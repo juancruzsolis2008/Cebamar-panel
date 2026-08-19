@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>Catálogo — Cebamar Yerbas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" crossorigin="anonymous" />
+<style>
+  :root{
+    --bg:#141F17; --card:#FAF4E3; --card-alt:#F1E7CC;
+    --ink:#22301C; --ink-soft:#6B7360; --cream:#F4EFE1; --gold:#C69A2B;
+    --gold-soft:#E7C567; --brown:#9C5B33; --green:#3F6B3B;
+    --red:#B4462F; --line:rgba(34,48,28,0.14);
+  }
+  *{ box-sizing:border-box; font-family:'Inter', sans-serif; }
+  html,body{ margin:0; padding:0; background:var(--bg); min-height:100vh; }
+  .serif{ font-family:'Fraunces', serif; }
+  #app{ max-width:520px; margin:0 auto; padding:24px 16px 48px; }
+
+  .header{ display:flex; align-items:center; gap:14px; margin-bottom:18px; }
+  .header h1{ color:var(--cream); font-size:19px; font-weight:600; margin:0; line-height:1.2; }
+  .header p{ color:var(--gold-soft); font-size:12px; margin:2px 0 0; }
+
+  .sheet{ background:var(--cream); border-radius:20px; padding:22px 18px 26px; }
+  .note{ background:var(--card-alt); border-radius:10px; padding:9px 12px; font-size:12.5px; color:var(--ink); margin:0 0 14px; }
+
+  .grid{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .prod-card{ background:var(--card); border-radius:14px; overflow:hidden; border:1px solid var(--line); }
+  .prod-img{ width:100%; aspect-ratio:1/1; object-fit:cover; display:block; background:var(--card-alt); }
+  .prod-img-empty{ width:100%; aspect-ratio:1/1; display:flex; align-items:center; justify-content:center; color:var(--ink-soft); background:var(--card-alt); }
+  .prod-body{ padding:9px 10px 11px; }
+  .prod-name{ margin:0; font-size:12.5px; font-weight:600; color:var(--ink); line-height:1.25; }
+  .prod-price{ margin:4px 0 0; font-family:'IBM Plex Mono', monospace; font-size:14px; font-weight:600; color:var(--brown); }
+  .badge{ display:inline-block; margin-top:5px; padding:2px 8px; border-radius:999px; font-size:10px; font-weight:600; }
+  .badge-ok{ background:rgba(63,107,59,.15); color:var(--green); }
+  .badge-out{ background:rgba(180,70,47,.15); color:var(--red); }
+
+  .footer{ margin-top:18px; padding-top:14px; border-top:1px dashed var(--line); text-align:center; }
+  .footer p{ margin:0; color:var(--ink-soft); font-size:11.5px; }
+
+  .empty, .loading, .error{ text-align:center; color:var(--gold-soft); padding:60px 20px; font-size:13px; }
+  .error{ color:#F0B8A6; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script>
+/* ---------------------------------------------------------------
+   Cebamar Yerbas — Catálogo público (solo lectura)
+   Usa el mismo proyecto de Firebase que el panel; no necesita login.
+------------------------------------------------------------------*/
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCanxH28xQ8b6-9Skxh3J96ZZZgHSbmsqE",
+  authDomain: "cebamar-yerbas.firebaseapp.com",
+  projectId: "cebamar-yerbas",
+  storageBucket: "cebamar-yerbas.firebasestorage.app",
+  messagingSenderId: "197559545149",
+  appId: "1:197559545149:web:64b16cabc1651d136aa954",
+};
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const money = (n) => (Number(n) || 0).toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 });
+
+function seal(size) {
+  return `
+  <svg viewBox="0 0 200 200" width="${size}" height="${size}" style="overflow:visible">
+    <defs><path id="sealPub" d="M 100,100 m -74,0 a 74,74 0 1,1 148,0 a 74,74 0 1,1 -148,0" /></defs>
+    <circle cx="100" cy="100" r="94" fill="none" stroke="var(--gold)" stroke-width="1.4" stroke-dasharray="1.5 5" />
+    <circle cx="100" cy="100" r="79" fill="none" stroke="var(--gold)" stroke-width="1" opacity="0.6" />
+    <text font-size="11.5" letter-spacing="3.2" fill="var(--gold)" font-family="'IBM Plex Mono', monospace">
+      <textPath href="#sealPub" startOffset="1%">CEBAMAR • YERBAS • MAR DEL PLATA •</textPath>
+    </text>
+    <text x="100" y="114" text-anchor="middle" font-size="46" font-family="'Fraunces', serif" font-weight="600" fill="var(--cream)">C</text>
+  </svg>`;
+}
+
+function render(state) {
+  const app = document.getElementById("app");
+  const today = new Date().toLocaleDateString("es-AR", { day: "2-digit", month: "long", year: "numeric" });
+
+  const header = `<div class="header">${seal(52)}<div><h1 class="serif">Cebamar Yerbas</h1><p>Catálogo · Mar del Plata</p></div></div>`;
+
+  if (state.status === "loading") {
+    app.innerHTML = header + `<div class="loading">Cargando catálogo…</div>`;
+    return;
+  }
+  if (state.status === "error") {
+    app.innerHTML = header + `<div class="error">No se pudo cargar el catálogo. Probá recargar la página en unos minutos.</div>`;
+    return;
+  }
+
+  const included = state.products.filter((p) => p.inCatalog !== false);
+  const cards = included.map((p) => `
+    <div class="prod-card">
+      ${p.image ? `<img class="prod-img" src="${p.image}" alt="${esc(p.name)}" />` : `<div class="prod-img-empty">🧉</div>`}
+      <div class="prod-body">
+        <p class="prod-name">${esc(p.name)}</p>
+        <p class="prod-price">${money(p.salePrice)} <span style="font-size:10px;font-weight:400;color:var(--ink-soft);">/ ${esc(p.unit)}</span></p>
+        <span class="badge ${Number(p.stock) > 0 ? "badge-ok" : "badge-out"}">${Number(p.stock) > 0 ? "Disponible" : "Sin stock"}</span>
+      </div>
+    </div>`).join("");
+
+  app.innerHTML = header + `
+    <div class="sheet">
+      <p style="margin:0 0 4px;color:var(--brown);font-size:11px;letter-spacing:.04em;">Actualizado · ${esc(today)}</p>
+      ${state.note ? `<p class="note">${esc(state.note)}</p>` : ""}
+      ${included.length === 0 ? `<div class="empty" style="color:var(--ink-soft);padding:40px 10px;">Todavía no hay productos cargados en el catálogo.</div>` : `<div class="grid">${cards}</div>`}
+      <div class="footer"><p>Pedidos por WhatsApp o Instagram @cebamar.yerbas · Entregas en Mar del Plata</p></div>
+    </div>
+  `;
+}
+
+(async () => {
+  const state = { status: "loading", products: [], note: "" };
+  render(state);
+  try {
+    if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+    const db = firebase.firestore();
+    const [productsSnap, noteSnap] = await Promise.all([
+      db.collection("cebamar").doc("cebamar-products").get(),
+      db.collection("cebamar").doc("cebamar-catalog-note").get(),
+    ]);
+    state.products = productsSnap.exists ? JSON.parse(productsSnap.data().value) : [];
+    state.note = noteSnap.exists ? JSON.parse(noteSnap.data().value) : "";
+    state.status = "ready";
+  } catch (err) {
+    state.status = "error";
+  }
+  render(state);
+})();
+</script>
+</body>
+</html>
