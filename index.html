@@ -302,13 +302,37 @@ async function persistSales(next) {
   render();
 }
 
+function logMovement(entry) {
+  const mv = { id: uid(), date: new Date().toISOString(), ...entry };
+  state.movements = [mv, ...state.movements].slice(0, 200);
+  saveJSON(MOVEMENTS_KEY, state.movements);
+  return mv;
+}
+
 function upsertProduct(p) {
   const exists = state.products.some((x) => x.id === p.id);
   const next = exists ? state.products.map((x) => (x.id === p.id ? p : x)) : [...state.products, p];
   persistProducts(next);
 }
 function deleteProduct(id) { persistProducts(state.products.filter((p) => p.id !== id)); }
-function addStock(id, qty) { persistProducts(state.products.map((p) => (p.id === id ? { ...p, stock: Number(p.stock) + Number(qty) } : p))); }
+function addStock(id, qty, unitCost) {
+  const product = state.products.find((p) => p.id === id);
+  if (!product) return;
+  const oldStock = Number(product.stock) || 0;
+  const newStock = oldStock + Number(qty);
+  let newCost = Number(product.costPrice) || 0;
+  if (unitCost !== null && unitCost !== undefined && !isNaN(unitCost) && unitCost > 0) {
+    newCost = oldStock > 0 ? (oldStock * newCost + Number(qty) * unitCost) / newStock : unitCost;
+    newCost = Math.round(newCost * 100) / 100;
+  }
+  const next = state.products.map((p) => (p.id === id ? { ...p, stock: newStock, costPrice: newCost } : p));
+  logMovement({
+    productId: id, productName: product.name, unit: product.unit,
+    type: "entrada", quantity: Number(qty),
+    note: unitCost ? `Costo: ${money(unitCost)}/${product.unit}` : "",
+  });
+  persistProducts(next);
+}
 
 function registerSale({ productId, quantity, unitPrice }) {
   const product = state.products.find((p) => p.id === productId);
@@ -318,6 +342,7 @@ function registerSale({ productId, quantity, unitPrice }) {
   const sale = { id: uid(), productId, productName: product.name, unit: product.unit, quantity, unitPrice, unitCost: Number(product.costPrice), total, profit, date: new Date().toISOString() };
   state.sales = [sale, ...state.sales];
   state.products = state.products.map((p) => (p.id === productId ? { ...p, stock: Number(p.stock) - quantity } : p));
+  logMovement({ productId, productName: product.name, unit: product.unit, type: "salida", quantity, note: `Venta · ${money(total)}` });
   Promise.all([saveJSON(SALES_KEY, state.sales), saveJSON(PRODUCTS_KEY, state.products)]).then(([a, b]) => { state.saveError = !(a && b); render(); });
   return true;
 }
@@ -326,6 +351,7 @@ function deleteSale(saleId) {
   if (!sale) return;
   state.sales = state.sales.filter((s) => s.id !== saleId);
   state.products = state.products.map((p) => (p.id === sale.productId ? { ...p, stock: Number(p.stock) + sale.quantity } : p));
+  logMovement({ productId: sale.productId, productName: sale.productName, unit: sale.unit, type: "entrada", quantity: sale.quantity, note: "Venta anulada" });
   Promise.all([saveJSON(SALES_KEY, state.sales), saveJSON(PRODUCTS_KEY, state.products)]).then(([a, b]) => { state.saveError = !(a && b); render(); });
 }
 
@@ -352,19 +378,51 @@ function renderStockTab() {
         </div>
       </div>
       ${low ? `<p style="color:var(--red);font-size:11px;margin:6px 0 0;display:flex;align-items:center;gap:4px;">${ICONS.alert} Stock bajo</p>` : ""}
-      <div style="display:flex;align-items:center;gap:8px;margin-top:12px;">
+      <div style="margin-top:12px;">
         ${adding ? `
-          <input type="number" step="0.5" placeholder="Cantidad (${esc(p.unit)})" id="stockqty-${p.id}" style="max-width:150px;" />
-          <button class="btn btn-primary" data-action="confirm-add-stock" data-id="${p.id}">Cargar</button>
-          <button class="btn btn-subtle" data-action="cancel-add-stock">${ICONS.x}</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+            <input type="number" step="0.5" placeholder="Cantidad (${esc(p.unit)})" id="stockqty-${p.id}" style="min-width:110px;flex:1;" />
+            <input type="number" step="0.01" placeholder="Costo de esta compra (opc.)" id="stockcost-${p.id}" style="min-width:150px;flex:1;" />
+          </div>
+          <p style="margin:0 0 8px;color:var(--ink-soft);font-size:11px;">Si esta vez compraste a otro precio, cargalo acá — recalculamos el costo promedio. Si lo dejás vacío, se mantiene el costo actual.</p>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-primary" data-action="confirm-add-stock" data-id="${p.id}">Cargar</button>
+            <button class="btn btn-subtle" data-action="cancel-add-stock">${ICONS.x}</button>
+          </div>
         ` : `
-          <button class="btn btn-subtle" data-action="open-add-stock" data-id="${p.id}">${ICONS.plus} Cargar stock</button>
-          <button class="btn btn-subtle" data-action="edit-product" data-id="${p.id}">${ICONS.pencil}</button>
-          <button class="btn btn-danger" data-action="delete-product" data-id="${p.id}">${ICONS.trash}</button>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <button class="btn btn-subtle" data-action="open-add-stock" data-id="${p.id}">${ICONS.plus} Cargar stock</button>
+            <button class="btn btn-subtle" data-action="edit-product" data-id="${p.id}">${ICONS.pencil}</button>
+            <button class="btn btn-danger" data-action="delete-product" data-id="${p.id}">${ICONS.trash}</button>
+          </div>
         `}
       </div>
     </div>`;
   });
+  html += renderMovementsHtml();
+  return html;
+}
+
+function renderMovementsHtml() {
+  const movs = state.movements.slice(0, 20);
+  let html = `<p style="color:var(--gold-soft);font-size:12px;margin:20px 0 8px;">Movimientos recientes</p>`;
+  if (movs.length === 0) {
+    html += emptyState("trend", "Todavía no hay movimientos de stock. Van a aparecer acá cada vez que cargues o vendas.");
+    return html;
+  }
+  html += movs.map((m) => {
+    const isIn = m.type === "entrada";
+    return `<div class="card" style="padding:12px 14px;display:flex;align-items:center;justify-content:space-between;">
+      <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+        <span style="flex-shrink:0;display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:999px;background:${isIn ? "rgba(63,107,59,.15)" : "rgba(180,70,47,.15)"};color:${isIn ? "var(--green)" : "var(--red)"};">${isIn ? ICONS.arrowUp : ICONS.arrowDown}</span>
+        <div style="min-width:0;">
+          <p style="margin:0;font-size:13px;font-weight:500;color:var(--ink);">${esc(m.productName)}</p>
+          <p style="margin:0;font-size:11px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${new Date(m.date).toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}${m.note ? " · " + esc(m.note) : ""}</p>
+        </div>
+      </div>
+      <span class="mono" style="flex-shrink:0;font-size:13px;font-weight:600;margin-left:10px;color:${isIn ? "var(--green)" : "var(--red)"};">${isIn ? "+" : "−"}${numFmt(m.quantity)} ${esc(m.unit)}</span>
+    </div>`;
+  }).join("");
   return html;
 }
 
@@ -563,7 +621,7 @@ function renderModal() {
   const product = m.mode === "edit" ? m.product : null;
   return `
     <div class="modal-overlay" data-action="close-modal-overlay">
-      <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal">
         <div class="row-between" style="margin-bottom:14px;">
           <h3 class="serif" style="font-size:18px;font-weight:600;">${product ? "Editar producto" : "Nuevo producto"}</h3>
           <button class="btn-icon" data-action="close-modal">${ICONS.x}</button>
@@ -671,10 +729,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   document.getElementById("app").addEventListener("click", async (e) => {
-    if (e.target.closest(".modal") && !e.target.closest("[data-action]")) return;
     const t = e.target.closest("[data-action]");
     if (!t) return;
     const action = t.dataset.action;
+    if (action === "close-modal-overlay" && e.target !== t) return;
     const id = t.dataset.id;
 
     if (action === "set-tab") { state.tab = t.dataset.tab; render(); }
@@ -699,9 +757,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     else if (action === "open-add-stock") { state.ui.addingStockFor = id; render(); }
     else if (action === "cancel-add-stock") { state.ui.addingStockFor = null; render(); }
     else if (action === "confirm-add-stock") {
-      const input = document.getElementById(`stockqty-${id}`);
-      const qty = Number(input.value);
-      if (qty > 0) addStock(id, qty);
+      const qtyInput = document.getElementById(`stockqty-${id}`);
+      const costInput = document.getElementById(`stockcost-${id}`);
+      const qty = Number(qtyInput.value);
+      const unitCost = costInput && costInput.value !== "" ? Number(costInput.value) : null;
+      if (qty > 0) addStock(id, qty, unitCost);
       state.ui.addingStockFor = null; render();
     }
 
@@ -762,11 +822,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const p = await loadJSON(PRODUCTS_KEY, null);
   const s = await loadJSON(SALES_KEY, null);
+  const mv = await loadJSON(MOVEMENTS_KEY, null);
   state.products = p || DEFAULT_PRODUCTS;
   state.sales = s || [];
+  state.movements = mv || [];
   if (state.firebaseConnected) {
     if (!p) await saveJSON(PRODUCTS_KEY, state.products);
     if (!s) await saveJSON(SALES_KEY, state.sales);
+    if (!mv) await saveJSON(MOVEMENTS_KEY, state.movements);
   }
   state.loading = false;
   render();
