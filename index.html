@@ -127,7 +127,6 @@
 <body>
 <div id="app"></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
@@ -163,6 +162,7 @@ function initFirebase() {
 const PRODUCTS_KEY = "cebamar-products";
 const SALES_KEY = "cebamar-sales";
 const MOVEMENTS_KEY = "cebamar-movements";
+const CATALOG_NOTE_KEY = "cebamar-catalog-note";
 const UNITS = ["kg", "paquete", "unidad"];
 
 const DEFAULT_PRODUCTS = [
@@ -243,20 +243,27 @@ function compressImage(file, maxDim = 640, quality = 0.6) {
   });
 }
 
-async function generateCatalogImage() {
-  const node = document.getElementById("catalog-print");
-  if (!node || typeof html2canvas === "undefined") {
-    alert("No se pudo cargar el generador de imágenes. Revisá tu conexión y probá de nuevo.");
-    return;
-  }
-  state.ui.generating = true; render();
+function getCatalogLink() {
+  try { return new URL("catalogo.html", window.location.href).toString(); }
+  catch { return "catalogo.html"; }
+}
+
+async function copyCatalogLink() {
+  const link = getCatalogLink();
   try {
-    const canvas = await html2canvas(node, { scale: 2, backgroundColor: "#F4EFE1", useCORS: true });
-    state.ui.catalogImage = canvas.toDataURL("image/png");
-  } catch (err) {
-    alert("No se pudo generar la imagen. Probá de nuevo.");
-  } finally {
-    state.ui.generating = false; render();
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(link);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = link; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    state.ui.linkCopied = true; render();
+    setTimeout(() => { state.ui.linkCopied = false; render(); }, 2000);
+  } catch {
+    alert("No se pudo copiar automáticamente. Copiá el link a mano: " + link);
   }
 }
 
@@ -290,7 +297,7 @@ let state = {
   sales: [],
   movements: [],
   tab: "stock",
-  ui: { modal: null, addingStockFor: null, saleProductId: null, gananciasPeriod: "month", catalogNote: "", generating: false, catalogImage: null },
+  ui: { modal: null, addingStockFor: null, editingStockFor: null, saleProductId: null, gananciasPeriod: "month", catalogNote: "", linkCopied: false },
 };
 
 async function persistProducts(next) {
@@ -338,6 +345,22 @@ function addStock(id, qty, unitCost) {
   persistProducts(next);
 }
 
+function correctStock(id, newStockValue) {
+  const product = state.products.find((p) => p.id === id);
+  if (!product) return;
+  const oldStock = Number(product.stock) || 0;
+  const next = Number(newStockValue);
+  if (isNaN(next) || next < 0 || next === oldStock) return;
+  const delta = next - oldStock;
+  const nextProducts = state.products.map((p) => (p.id === id ? { ...p, stock: next } : p));
+  logMovement({
+    productId: id, productName: product.name, unit: product.unit,
+    type: delta > 0 ? "entrada" : "salida", quantity: Math.abs(delta),
+    note: "Corrección manual",
+  });
+  persistProducts(nextProducts);
+}
+
 function registerSale({ productId, quantity, unitPrice }) {
   const product = state.products.find((p) => p.id === productId);
   if (!product || quantity <= 0 || quantity > Number(product.stock)) return false;
@@ -372,6 +395,7 @@ function renderStockTab() {
   products.forEach((p) => {
     const low = Number(p.stock) <= 3;
     const adding = state.ui.addingStockFor === p.id;
+    const editingStock = state.ui.editingStockFor === p.id;
     html += `<div class="card">
       <div class="row-start">
         <div><p class="serif" style="margin:0;font-weight:600;color:var(--ink);font-size:16px;">${esc(p.name)}</p>
@@ -383,7 +407,16 @@ function renderStockTab() {
       </div>
       ${low ? `<p style="color:var(--red);font-size:11px;margin:6px 0 0;display:flex;align-items:center;gap:4px;">${ICONS.alert} Stock bajo</p>` : ""}
       <div style="margin-top:12px;">
-        ${adding ? `
+        ${editingStock ? `
+          <div style="display:flex;gap:8px;margin-bottom:6px;">
+            <input type="number" step="0.5" id="editstock-${p.id}" value="${numFmt(p.stock)}" style="max-width:150px;" />
+          </div>
+          <p style="margin:0 0 8px;color:var(--ink-soft);font-size:11px;">Poné el total correcto de stock. Queda registrado como ajuste en Movimientos.</p>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-primary" data-action="confirm-edit-stock" data-id="${p.id}">Guardar</button>
+            <button class="btn btn-subtle" data-action="cancel-edit-stock">${ICONS.x}</button>
+          </div>
+        ` : adding ? `
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
             <input type="number" step="0.5" placeholder="Cantidad (${esc(p.unit)})" id="stockqty-${p.id}" style="min-width:110px;flex:1;" />
             <input type="number" step="0.01" placeholder="Costo de esta compra (opc.)" id="stockcost-${p.id}" style="min-width:150px;flex:1;" />
@@ -394,8 +427,9 @@ function renderStockTab() {
             <button class="btn btn-subtle" data-action="cancel-add-stock">${ICONS.x}</button>
           </div>
         ` : `
-          <div style="display:flex;align-items:center;gap:8px;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <button class="btn btn-subtle" data-action="open-add-stock" data-id="${p.id}">${ICONS.plus} Cargar stock</button>
+            <button class="btn btn-subtle" data-action="open-edit-stock" data-id="${p.id}">${ICONS.pencil} Corregir stock</button>
             <button class="btn btn-subtle" data-action="edit-product" data-id="${p.id}">${ICONS.pencil}</button>
             <button class="btn btn-danger" data-action="delete-product" data-id="${p.id}">${ICONS.trash}</button>
           </div>
@@ -585,14 +619,18 @@ function renderCatalogoTab() {
     </div>`).join("");
 
   const today = new Date().toLocaleDateString("es-AR", { day: "2-digit", month: "long", year: "numeric" });
+  const link = getCatalogLink();
 
   return `
     <p style="color:var(--gold-soft);font-size:12px;margin:0 0 10px;">Cargá una foto y el precio de cada producto — así arma el catálogo de abajo.</p>
     ${editRows}
 
-    <div class="field" style="margin:18px 0 14px;">
+    <div class="field" style="margin:18px 0 6px;">
       <span>Mensaje del catálogo (opcional)</span>
       <input id="catalog-note-input" placeholder="Ej: Precios válidos por stock disponible" value="${esc(state.ui.catalogNote)}" />
+    </div>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:14px;">
+      <button class="btn btn-subtle" data-action="save-catalog-note">Guardar mensaje</button>
     </div>
 
     <p style="color:var(--gold-soft);font-size:12px;margin:0 0 8px;">Vista previa</p>
@@ -606,15 +644,15 @@ function renderCatalogoTab() {
       <div class="catalog-footer"><p>Pedidos por WhatsApp o Instagram @cebamar.yerbas · Entregas en Mar del Plata</p></div>
     </div>
 
-    <div style="margin-top:16px;">
-      <button class="btn btn-gold" style="width:100%;" data-action="generate-catalog-image" ${state.ui.generating ? "disabled" : ""}>${ICONS.image} ${state.ui.generating ? "Generando…" : "Generar imagen para compartir"}</button>
-    </div>
-    ${state.ui.catalogImage ? `
-      <div class="card" style="margin-top:14px;">
-        <p style="margin:0 0 10px;color:var(--ink-soft);font-size:12px;">Mantené el dedo sobre la imagen para guardarla o compartirla directo por WhatsApp / Instagram.</p>
-        <img src="${state.ui.catalogImage}" alt="Catálogo Cebamar Yerbas" style="width:100%;border-radius:12px;display:block;" />
+    <div class="card" style="margin-top:16px;">
+      <p class="serif" style="margin:0 0 6px;font-weight:600;color:var(--ink);">Compartir catálogo</p>
+      <p style="margin:0 0 10px;color:var(--ink-soft);font-size:12px;">Este link muestra el catálogo siempre actualizado — no hace falta generar nada de nuevo cuando cambian precios o stock.</p>
+      <input id="catalog-link-input" value="${esc(link)}" readonly onclick="this.select()" style="margin-bottom:10px;" />
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-gold" style="flex:1;" data-action="copy-catalog-link">${state.ui.linkCopied ? "¡Copiado!" : "Copiar link"}</button>
+        <a class="btn btn-subtle" href="${esc(link)}" target="_blank" rel="noopener" style="flex:1;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;">Abrir</a>
       </div>
-    ` : ""}
+    </div>
   `;
 }
 
@@ -758,8 +796,17 @@ document.addEventListener("DOMContentLoaded", async () => {
       state.ui.modal = null; render();
     }
 
-    else if (action === "open-add-stock") { state.ui.addingStockFor = id; render(); }
+    else if (action === "open-add-stock") { state.ui.addingStockFor = id; state.ui.editingStockFor = null; render(); }
     else if (action === "cancel-add-stock") { state.ui.addingStockFor = null; render(); }
+    else if (action === "open-edit-stock") { state.ui.editingStockFor = id; state.ui.addingStockFor = null; render(); }
+    else if (action === "cancel-edit-stock") { state.ui.editingStockFor = null; render(); }
+    else if (action === "confirm-edit-stock") {
+      const input = document.getElementById(`editstock-${id}`);
+      const newStock = Number(input.value);
+      state.ui.editingStockFor = null;
+      correctStock(id, newStock);
+      render();
+    }
     else if (action === "confirm-add-stock") {
       const qtyInput = document.getElementById(`stockqty-${id}`);
       const costInput = document.getElementById(`stockcost-${id}`);
@@ -796,7 +843,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       const p = state.products.find((p) => p.id === id);
       if (p) upsertProduct({ ...p, image: null });
     }
-    else if (action === "generate-catalog-image") { generateCatalogImage(); }
+    else if (action === "copy-catalog-link") { copyCatalogLink(); }
+    else if (action === "save-catalog-note") {
+      saveJSON(CATALOG_NOTE_KEY, state.ui.catalogNote).then((ok) => { state.saveError = !ok; render(); });
+    }
   });
 
   document.getElementById("app").addEventListener("change", async (e) => {
@@ -827,9 +877,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   const p = await loadJSON(PRODUCTS_KEY, null);
   const s = await loadJSON(SALES_KEY, null);
   const mv = await loadJSON(MOVEMENTS_KEY, null);
+  const note = await loadJSON(CATALOG_NOTE_KEY, null);
   state.products = p || DEFAULT_PRODUCTS;
   state.sales = s || [];
   state.movements = mv || [];
+  state.ui.catalogNote = note || "";
   if (state.firebaseConnected) {
     if (!p) await saveJSON(PRODUCTS_KEY, state.products);
     if (!s) await saveJSON(SALES_KEY, state.sales);
